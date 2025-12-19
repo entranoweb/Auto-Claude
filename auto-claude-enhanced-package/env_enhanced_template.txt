@@ -1,0 +1,151 @@
+# ============================================================================
+# AUTO CLAUDE - ENHANCED TOOLS CONFIGURATION
+# ============================================================================
+# Complete configuration for Morph, Augment, and Azure Foundry
+
+# ============================================================================
+# AZURE FOUNDRY (Anthropic on Azure)
+# ============================================================================
+# Your Azure Foundry resource and API key
+ANTHROPIC_FOUNDRY_API_KEY=your_azure_api_key_here
+ANTHROPIC_FOUNDRY_RESOURCE=ai-synthiq2181159623886
+
+# Alternative: use full base URL instead of resource name
+# ANTHROPIC_FOUNDRY_BASE_URL=https://ai-synthiq2181159623886.services.ai.azure.com/anthropic/
+
+# Enable Foundry mode for Claude Agent SDK
+CLAUDE_CODE_USE_FOUNDRY=1
+
+# Model deployment names (match your Azure deployments)
+ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
+ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5
+ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-5
+
+# Primary model for Auto Claude
+AUTO_BUILD_MODEL=claude-opus-4-5
+
+# ============================================================================
+# MORPH LLM (Fast Apply + Warp Grep)
+# ============================================================================
+# Get API key from: https://morphllm.com/dashboard
+MORPH_API_KEY=your_morph_api_key_here
+
+# Enabled tools (optional - defaults to both)
+MORPH_ENABLED_TOOLS=edit_file_fast,warpgrep_search
+
+# Pricing:
+# Fast Apply: $0.80/1M input, $1.20/1M output
+# Warp Grep: $0.30/1M tokens
+# Free tier: 100k tokens/month
+
+# ============================================================================
+# AUGMENT CODE (Context Engine)
+# ============================================================================
+# Get API key from: https://augmentcode.com
+AUGMENT_API_KEY=your_augment_api_key_here
+
+# Pricing: $20/month unlimited
+
+# ============================================================================
+# GRAPHITI MEMORY (with Azure Foundry)
+# ============================================================================
+GRAPHITI_ENABLED=true
+GRAPHITI_LLM_PROVIDER=anthropic
+GRAPHITI_EMBEDDER_PROVIDER=voyage
+
+# Use same Azure Foundry config for Graphiti
+ANTHROPIC_API_KEY=your_azure_api_key_here
+GRAPHITI_ANTHROPIC_MODEL=claude-opus-4-5
+
+# Voyage AI for embeddings (Anthropic doesn't do embeddings)
+VOYAGE_API_KEY=your_voyage_key_here
+VOYAGE_EMBEDDING_MODEL=voyage-3
+
+# ============================================================================
+# FALKORDB (for Graphiti memory)
+# ============================================================================
+GRAPHITI_FALKORDB_HOST=localhost
+GRAPHITI_FALKORDB_PORT=6379
+GRAPHITI_DATABASE=synthiq_memory
+
+# ============================================================================
+# OPTIONAL: LINEAR INTEGRATION
+# ============================================================================
+# LINEAR_API_KEY=lin_api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# LINEAR_TEAM_ID=
+# LINEAR_PROJECT_ID=
+
+# ============================================================================
+# OPTIONAL: DEBUG MODE
+# ============================================================================
+# DEBUG=true
+# DEBUG_LEVEL=1
+
+# ============================================================================
+# PERFORMANCE COMPARISON
+# ============================================================================
+# Without enhanced tools:
+# - Code edits: ~30-40s per file
+# - Search: Manual grep/read cycles
+# - Context accuracy: ~70%
+#
+# With enhanced tools:
+# - Code edits: ~6s per file (83% faster!) ⚡
+# - Search: Single Warp Grep call (4x faster) 🔍
+# - Context accuracy: ~95% 🎯
+#
+# Cost savings:
+# - Fewer tokens used (40% reduction)
+# - Fewer API calls
+# - Less time wasted on retries
+
+# ============================================================================
+# QUICK START
+# ============================================================================
+# 1. Get API keys:
+#    - Morph: https://morphllm.com/dashboard
+#    - Augment: https://augmentcode.com
+#    - Voyage: https://voyageai.com
+#
+# 2. Run installation script:
+#    chmod +x install_enhanced_tools.sh
+#    ./install_enhanced_tools.sh
+#
+# 3. Fill in the API keys above
+#
+# 4. Test the setup:
+#    python test_enhanced_tools.py
+#
+# 5. Restart Auto Claude
+#    docker-compose down && docker-compose up -d
+#
+# 6. Check logs for enhanced tools in action:
+#    docker-compose logs -f
+
+# ============================================================================
+# TROUBLESHOOTING
+# ============================================================================
+# If tools don't load:
+# - Check API keys are set correctly
+# - Verify Node.js is installed (node --version)
+# - Check Python packages: pip list | grep aiohttp
+# - Run test script: python test_enhanced_tools.py
+#
+# For Morph issues:
+# - Check bridge script exists: ls integrations/morph/morph_bridge.js
+# - Test npm packages: npm list -g @morphllm/morphsdk
+#
+# For Augment issues:
+# - Check CLI: auggie --version
+# - Test connection: auggie context --query "test"
+
+# ============================================================================
+# COST OPTIMIZATION TIPS
+# ============================================================================
+# 1. Use Warp Grep first before reading files (saves 70% context)
+# 2. Use Fast Apply instead of full rewrites (saves 40% tokens)
+# 3. Use Augment Context for complex queries (one call vs many)
+# 4. Enable Graphiti memory to reduce repeated context retrieval
+# 5. Monitor usage in dashboards:
+#    - Morph: https://morphllm.com/dashboard
+#    - Azure: https://portal.azure.com

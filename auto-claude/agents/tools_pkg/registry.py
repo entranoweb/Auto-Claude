@@ -22,6 +22,21 @@ from .tools import (
     create_subtask_tools,
 )
 
+# Enhanced Tools Integration (Morph + Augment)
+try:
+    import sys
+    from pathlib import Path
+    # Add parent directory to import integrations
+    parent_dir = Path(__file__).parent.parent.parent
+    if str(parent_dir) not in sys.path:
+        sys.path.insert(0, str(parent_dir))
+    
+    from integrations.enhanced_tools import get_enhanced_tools
+    ENHANCED_TOOLS_AVAILABLE = True
+except ImportError as e:
+    ENHANCED_TOOLS_AVAILABLE = False
+    get_enhanced_tools = None
+
 
 def create_all_tools(spec_dir: Path, project_dir: Path) -> list:
     """
@@ -44,6 +59,16 @@ def create_all_tools(spec_dir: Path, project_dir: Path) -> list:
     all_tools.extend(create_progress_tools(spec_dir, project_dir))
     all_tools.extend(create_memory_tools(spec_dir, project_dir))
     all_tools.extend(create_qa_tools(spec_dir, project_dir))
+    
+    # Add enhanced tools (Morph Fast Apply, Warp Grep, Augment)
+    if ENHANCED_TOOLS_AVAILABLE:
+        try:
+            enhanced_tools = get_enhanced_tools(project_dir)
+            if enhanced_tools:
+                all_tools.extend(enhanced_tools)
+                print(f"✓ Enhanced tools loaded: {len(enhanced_tools)} tools")
+        except Exception as e:
+            print(f"⚠️  Failed to load enhanced tools: {e}")
 
     return all_tools
 
