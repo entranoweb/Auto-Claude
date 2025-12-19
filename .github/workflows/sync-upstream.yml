@@ -1,0 +1,82 @@
+name: Sync with Upstream Auto-Claude
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout synthiq-claude branch
+        uses: actions/checkout@v4
+        with:
+          ref: synthiq-claude
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure Git
+        run: |
+          git config user.name "Synthiq Auto-Sync"
+          git config user.email "auto-sync@synthiq.io"
+      
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/entranoweb/Auto-Claude.git || true
+          git fetch upstream
+      
+      - name: Merge upstream main to local main
+        run: |
+          git checkout main || git checkout -b main
+          git merge upstream/main --no-edit || echo "Merge conflicts detected"
+          
+      - name: Push updated main
+        run: |
+          git push origin main --force-with-lease
+        continue-on-error: true
+      
+      - name: Create Pull Request for synthiq-claude
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: sync upstream Auto-Claude changes"
+          title: "🔄 Upstream Sync: Auto-Claude Updates"
+          body: |
+            ## 🔄 Automated Upstream Sync
+            
+            This PR merges the latest changes from [entranoweb/Auto-Claude](https://github.com/entranoweb/Auto-Claude) into the `main` branch.
+            
+            **Source:** `upstream/main`
+            **Target:** `main`
+            
+            ### ⚠️ Review Required
+            
+            Please review these changes before merging into `synthiq-claude`:
+            
+            1. Check for conflicts with Synthiq customizations
+            2. Verify enhanced tools integration still works
+            3. Test Azure Foundry configuration
+            4. Ensure startup scripts are compatible
+            
+            ### 🔀 Merge Instructions
+            
+            After reviewing and testing:
+            ```bash
+            git checkout synthiq-claude
+            git merge main --no-ff
+            # Resolve any conflicts
+            # Test thoroughly
+            git push origin synthiq-claude
+            ```
+            
+            ---
+            **Automated by:** Synthiq Upstream Sync Workflow
+            **Triggered:** ${{ github.event_name }}
+          branch: upstream-sync-${{ github.run_number }}
+          delete-branch: true
+          labels: |
+            upstream-sync
+            automated
