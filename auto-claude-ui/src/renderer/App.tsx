@@ -1,5 +1,18 @@
 import { useState, useEffect } from 'react';
 import { Settings2, Download, RefreshCw, AlertCircle } from 'lucide-react';
+import {
+  DndContext,
+  DragOverlay,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy
+} from '@dnd-kit/sortable';
 import { TooltipProvider } from './components/ui/tooltip';
 import { Button } from './components/ui/button';
 import {
@@ -17,7 +30,7 @@ import {
 } from './components/ui/tooltip';
 import { Sidebar, type SidebarView } from './components/Sidebar';
 import { KanbanBoard } from './components/KanbanBoard';
-import { TaskDetailPanel } from './components/TaskDetailPanel';
+import { TaskDetailModal } from './components/task-detail/TaskDetailModal';
 import { TaskCreationWizard } from './components/TaskCreationWizard';
 import { AppSettingsDialog, type AppSection } from './components/settings/AppSettings';
 import type { ProjectSettingsSection } from './components/settings/ProjectSettingsContent';
@@ -29,7 +42,6 @@ import { Insights } from './components/Insights';
 import { GitHubIssues } from './components/GitHubIssues';
 import { Changelog } from './components/Changelog';
 import { Worktrees } from './components/Worktrees';
-import { AgentProfiles } from './components/AgentProfiles';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { RateLimitModal } from './components/RateLimitModal';
 import { SDKRateLimitModal } from './components/SDKRateLimitModal';
@@ -37,12 +49,15 @@ import { OnboardingWizard } from './components/onboarding';
 import { AppUpdateNotification } from './components/AppUpdateNotification';
 import { UsageIndicator } from './components/UsageIndicator';
 import { ProactiveSwapListener } from './components/ProactiveSwapListener';
+import { GitHubSetupModal } from './components/GitHubSetupModal';
 import { useProjectStore, loadProjects, addProject, initializeProject } from './stores/project-store';
 import { useTaskStore, loadTasks } from './stores/task-store';
 import { useSettingsStore, loadSettings } from './stores/settings-store';
 import { useTerminalStore, restoreTerminalSessions } from './stores/terminal-store';
 import { useIpcListeners } from './hooks/useIpc';
-import type { Task, Project } from '../shared/types';
+import { COLOR_THEMES } from '../shared/constants';
+import type { Task, Project, ColorTheme } from '../shared/types';
+import { ProjectTabBar } from './components/ProjectTabBar';
 
 export function App() {
   // Load IPC listeners for real-time updates
@@ -51,6 +66,13 @@ export function App() {
   // Stores
   const projects = useProjectStore((state) => state.projects);
   const selectedProjectId = useProjectStore((state) => state.selectedProjectId);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const getProjectTabs = useProjectStore((state) => state.getProjectTabs);
+  const openProjectIds = useProjectStore((state) => state.openProjectIds);
+  const openProjectTab = useProjectStore((state) => state.openProjectTab);
+  const closeProjectTab = useProjectStore((state) => state.closeProjectTab);
+  const setActiveProject = useProjectStore((state) => state.setActiveProject);
+  const reorderTabs = useProjectStore((state) => state.reorderTabs);
   const tasks = useTaskStore((state) => state.tasks);
   const settings = useSettingsStore((state) => state.settings);
   const settingsLoading = useSettingsStore((state) => state.isLoading);
@@ -68,16 +90,82 @@ export function App() {
   const [showInitDialog, setShowInitDialog] = useState(false);
   const [pendingProject, setPendingProject] = useState<Project | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
+  const [initSuccess, setInitSuccess] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
   const [skippedInitProjectId, setSkippedInitProjectId] = useState<string | null>(null);
 
-  // Get selected project
-  const selectedProject = projects.find((p) => p.id === selectedProjectId);
+  // GitHub setup state (shown after Auto Claude init)
+  const [showGitHubSetup, setShowGitHubSetup] = useState(false);
+  const [gitHubSetupProject, setGitHubSetupProject] = useState<Project | null>(null);
+
+  // Setup drag sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8, // 8px movement required before drag starts
+      },
+    })
+  );
+
+  // Track dragging state for overlay
+  const [activeDragProject, setActiveDragProject] = useState<Project | null>(null);
+
+  // Get tabs and selected project
+  const projectTabs = getProjectTabs();
+  const selectedProject = projects.find((p) => p.id === (activeProjectId || selectedProjectId));
 
   // Initial load
   useEffect(() => {
     loadProjects();
     loadSettings();
   }, []);
+
+  // Restore tab state and open tabs for loaded projects
+  useEffect(() => {
+    console.log('[App] Tab restore useEffect triggered:', {
+      projectsCount: projects.length,
+      openProjectIds,
+      activeProjectId,
+      selectedProjectId,
+      projectTabsCount: projectTabs.length,
+      projectTabIds: projectTabs.map(p => p.id)
+    });
+
+    if (projects.length > 0) {
+      // Check openProjectIds (persisted state) instead of projectTabs (computed)
+      // to avoid race condition where projectTabs is empty before projects load
+      if (openProjectIds.length === 0) {
+        // No tabs persisted at all, open the first available project
+        const projectToOpen = activeProjectId || selectedProjectId || projects[0].id;
+        console.log('[App] No tabs persisted, opening project:', projectToOpen);
+        // Verify the project exists before opening
+        if (projects.some(p => p.id === projectToOpen)) {
+          openProjectTab(projectToOpen);
+          setActiveProject(projectToOpen);
+        } else {
+          // Fallback to first project if stored IDs are invalid
+          console.log('[App] Project not found, falling back to first project:', projects[0].id);
+          openProjectTab(projects[0].id);
+          setActiveProject(projects[0].id);
+        }
+        return;
+      }
+      console.log('[App] Tabs already persisted, checking active project');
+      // If there's an active project but no tabs open for it, open a tab
+      if (activeProjectId && !projectTabs.some(tab => tab.id === activeProjectId)) {
+        console.log('[App] Active project has no tab, opening:', activeProjectId);
+        openProjectTab(activeProjectId);
+      }
+      // If there's a selected project but no active project, make it active
+      else if (selectedProjectId && !activeProjectId) {
+        console.log('[App] No active project, using selected:', selectedProjectId);
+        setActiveProject(selectedProjectId);
+        openProjectTab(selectedProjectId);
+      } else {
+        console.log('[App] Tab state is valid, no action needed');
+      }
+    }
+  }, [projects, activeProjectId, selectedProjectId, openProjectIds, projectTabs, openProjectTab, setActiveProject]);
 
   // Track if settings have been loaded at least once
   const [settingsHaveLoaded, setSettingsHaveLoaded] = useState(false);
@@ -128,19 +216,75 @@ export function App() {
     };
   }, []);
 
+  // Reset init success flag when selected project changes
+  // This allows the init dialog to show for new/different projects
+  useEffect(() => {
+    setInitSuccess(false);
+    setInitError(null);
+  }, [selectedProjectId]);
+
   // Check if selected project needs initialization (e.g., .auto-claude folder was deleted)
   useEffect(() => {
+    // Don't show dialog while initialization is in progress
+    if (isInitializing) return;
+
+    // Don't reopen dialog after successful initialization
+    // (project update with autoBuildPath may not have propagated yet)
+    if (initSuccess) return;
+
     if (selectedProject && !selectedProject.autoBuildPath && skippedInitProjectId !== selectedProject.id) {
       // Project exists but isn't initialized - show init dialog
       setPendingProject(selectedProject);
+      setInitError(null); // Clear any previous errors
+      setInitSuccess(false); // Reset success flag
       setShowInitDialog(true);
     }
-  }, [selectedProject, skippedInitProjectId]);
+  }, [selectedProject, skippedInitProjectId, isInitializing, initSuccess]);
+
+  // Global keyboard shortcut: Cmd/Ctrl+T to add project (when not on terminals view)
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      // Skip if in input fields
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target as HTMLElement)?.isContentEditable
+      ) {
+        return;
+      }
+
+      // Cmd/Ctrl+T: Add new project (only when not on terminals view)
+      if ((e.ctrlKey || e.metaKey) && e.key === 't' && activeView !== 'terminals') {
+        e.preventDefault();
+        try {
+          const path = await window.electronAPI.selectDirectory();
+          if (path) {
+            const project = await addProject(path);
+            if (project) {
+              openProjectTab(project.id);
+              if (!project.autoBuildPath) {
+                setPendingProject(project);
+                setInitError(null);
+                setInitSuccess(false);
+                setShowInitDialog(true);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Failed to add project:', error);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeView, openProjectTab]);
 
   // Load tasks when project changes
   useEffect(() => {
-    if (selectedProjectId) {
-      loadTasks(selectedProjectId);
+    const currentProjectId = activeProjectId || selectedProjectId;
+    if (currentProjectId) {
+      loadTasks(currentProjectId);
       setSelectedTask(null); // Clear selection on project change
     } else {
       useTaskStore.getState().clearTasks();
@@ -161,24 +305,41 @@ export function App() {
         console.error('[App] Failed to restore sessions:', err);
       });
     }
-  }, [selectedProjectId, selectedProject?.path, selectedProject?.name]);
+  }, [activeProjectId, selectedProjectId, selectedProject?.path, selectedProject?.name]);
 
   // Apply theme on load
   useEffect(() => {
+    const root = document.documentElement;
+
     const applyTheme = () => {
+      // Apply light/dark mode
       if (settings.theme === 'dark') {
-        document.documentElement.classList.add('dark');
+        root.classList.add('dark');
       } else if (settings.theme === 'light') {
-        document.documentElement.classList.remove('dark');
+        root.classList.remove('dark');
       } else {
         // System preference
         if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-          document.documentElement.classList.add('dark');
+          root.classList.add('dark');
         } else {
-          document.documentElement.classList.remove('dark');
+          root.classList.remove('dark');
         }
       }
     };
+
+    // Apply color theme via data-theme attribute
+    // Validate colorTheme against known themes, fallback to 'default' if invalid
+    const validThemeIds = COLOR_THEMES.map((t) => t.id);
+    const rawColorTheme = settings.colorTheme ?? 'default';
+    const colorTheme: ColorTheme = validThemeIds.includes(rawColorTheme as ColorTheme)
+      ? (rawColorTheme as ColorTheme)
+      : 'default';
+
+    if (colorTheme === 'default') {
+      root.removeAttribute('data-theme');
+    } else {
+      root.setAttribute('data-theme', colorTheme);
+    }
 
     applyTheme();
 
@@ -194,7 +355,7 @@ export function App() {
     return () => {
       mediaQuery.removeEventListener('change', handleChange);
     };
-  }, [settings.theme]);
+  }, [settings.theme, settings.colorTheme]);
 
   // Update selected task when tasks change (for real-time updates)
   useEffect(() => {
@@ -221,10 +382,17 @@ export function App() {
       const path = await window.electronAPI.selectDirectory();
       if (path) {
         const project = await addProject(path);
-        if (project && !project.autoBuildPath) {
-          // Project doesn't have Auto Claude initialized, show init dialog
-          setPendingProject(project);
-          setShowInitDialog(true);
+        if (project) {
+          // Open a tab for the new project
+          openProjectTab(project.id);
+
+          if (!project.autoBuildPath) {
+            // Project doesn't have Auto Claude initialized, show init dialog
+            setPendingProject(project);
+            setInitError(null); // Clear any previous errors
+            setInitSuccess(false); // Reset success flag
+            setShowInitDialog(true);
+          }
         }
       }
     } catch (error) {
@@ -232,27 +400,135 @@ export function App() {
     }
   };
 
+  const handleProjectTabSelect = (projectId: string) => {
+    setActiveProject(projectId);
+  };
+
+  const handleProjectTabClose = (projectId: string) => {
+    closeProjectTab(projectId);
+  };
+
+  // Handle drag start - set the active dragged project
+  const handleDragStart = (event: any) => {
+    const { active } = event;
+    const draggedProject = projectTabs.find(p => p.id === active.id);
+    if (draggedProject) {
+      setActiveDragProject(draggedProject);
+    }
+  };
+
+  // Handle drag end - reorder tabs if dropped over another tab
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveDragProject(null);
+
+    if (!over) return;
+
+    const oldIndex = projectTabs.findIndex(p => p.id === active.id);
+    const newIndex = projectTabs.findIndex(p => p.id === over.id);
+
+    if (oldIndex !== newIndex && oldIndex !== -1 && newIndex !== -1) {
+      reorderTabs(oldIndex, newIndex);
+    }
+  };
+
   const handleInitialize = async () => {
     if (!pendingProject) return;
 
+    const projectId = pendingProject.id;
+    console.log('[InitDialog] Starting initialization for project:', projectId);
     setIsInitializing(true);
+    setInitSuccess(false);
+    setInitError(null); // Clear any previous errors
     try {
-      const result = await initializeProject(pendingProject.id);
+      const result = await initializeProject(projectId);
+      console.log('[InitDialog] Initialization result:', result);
+
       if (result?.success) {
+        console.log('[InitDialog] Initialization successful, closing dialog');
+        // Get the updated project from store
+        const updatedProject = useProjectStore.getState().projects.find(p => p.id === projectId);
+        console.log('[InitDialog] Updated project:', updatedProject);
+
+        // Mark as successful to prevent onOpenChange from treating this as a skip
+        setInitSuccess(true);
+        setIsInitializing(false);
+
+        // Now close the dialog
         setShowInitDialog(false);
         setPendingProject(null);
+
+        // Show GitHub setup modal
+        if (updatedProject) {
+          setGitHubSetupProject(updatedProject);
+          setShowGitHubSetup(true);
+        }
+      } else {
+        // Initialization failed - show error but keep dialog open
+        console.log('[InitDialog] Initialization failed, showing error');
+        const errorMessage = result?.error || 'Failed to initialize Auto Claude. Please try again.';
+        setInitError(errorMessage);
+        setIsInitializing(false);
       }
-    } finally {
+    } catch (error) {
+      // Unexpected error occurred
+      console.error('[InitDialog] Unexpected error during initialization:', error);
+      const errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred';
+      setInitError(errorMessage);
       setIsInitializing(false);
     }
   };
 
+  const handleGitHubSetupComplete = async (settings: {
+    githubToken: string;
+    githubRepo: string;
+    mainBranch: string;
+  }) => {
+    if (!gitHubSetupProject) return;
+
+    try {
+      // NOTE: settings.githubToken is a GitHub access token (from gh CLI),
+      // NOT a Claude Code OAuth token. They are different things:
+      // - GitHub token: for GitHub API access (repo operations)
+      // - Claude token: for Claude AI access (run.py, roadmap, etc.)
+      // The user needs to separately authenticate with Claude using 'claude setup-token'
+
+      // Update project env config with GitHub settings
+      await window.electronAPI.updateProjectEnv(gitHubSetupProject.id, {
+        githubEnabled: true,
+        githubToken: settings.githubToken, // GitHub token for repo access
+        githubRepo: settings.githubRepo
+      });
+
+      // Update project settings with mainBranch
+      await window.electronAPI.updateProjectSettings(gitHubSetupProject.id, {
+        mainBranch: settings.mainBranch
+      });
+
+      // Refresh projects to get updated data
+      await loadProjects();
+    } catch (error) {
+      console.error('Failed to save GitHub settings:', error);
+    }
+
+    setShowGitHubSetup(false);
+    setGitHubSetupProject(null);
+  };
+
+  const handleGitHubSetupSkip = () => {
+    setShowGitHubSetup(false);
+    setGitHubSetupProject(null);
+  };
+
   const handleSkipInit = () => {
+    console.log('[InitDialog] User skipped initialization');
     if (pendingProject) {
       setSkippedInitProjectId(pendingProject.id);
     }
     setShowInitDialog(false);
     setPendingProject(null);
+    setInitError(null); // Clear any error when skipping
+    setInitSuccess(false); // Reset success flag
   };
 
   const handleGoToTask = (taskId: string) => {
@@ -279,6 +555,38 @@ export function App() {
 
         {/* Main content */}
         <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Project Tabs */}
+          {projectTabs.length > 0 && (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext items={projectTabs.map(p => p.id)} strategy={horizontalListSortingStrategy}>
+                <ProjectTabBar
+                  projects={projectTabs}
+                  activeProjectId={activeProjectId}
+                  onProjectSelect={handleProjectTabSelect}
+                  onProjectClose={handleProjectTabClose}
+                  onAddProject={handleAddProject}
+                />
+              </SortableContext>
+
+              {/* Drag overlay - shows what's being dragged */}
+              <DragOverlay>
+                {activeDragProject && (
+                  <div className="flex items-center gap-2 bg-card border border-border rounded-md px-4 py-2.5 shadow-lg max-w-[200px]">
+                    <div className="w-1 h-4 bg-muted-foreground rounded-full" />
+                    <span className="truncate font-medium text-sm">
+                      {activeDragProject.name}
+                    </span>
+                  </div>
+                )}
+              </DragOverlay>
+            </DndContext>
+          )}
+
           {/* Header */}
           <header className="electron-drag flex h-14 items-center justify-between border-b border-border bg-card/50 backdrop-blur-sm px-6">
             <div className="electron-no-drag">
@@ -325,21 +633,22 @@ export function App() {
                   <TerminalGrid
                     projectPath={selectedProject?.path}
                     onNewTaskClick={() => setIsNewTaskDialogOpen(true)}
+                    isActive={activeView === 'terminals'}
                   />
                 </div>
-                {activeView === 'roadmap' && selectedProjectId && (
-                  <Roadmap projectId={selectedProjectId} onGoToTask={handleGoToTask} />
+                {activeView === 'roadmap' && (activeProjectId || selectedProjectId) && (
+                  <Roadmap projectId={activeProjectId || selectedProjectId!} onGoToTask={handleGoToTask} />
                 )}
-                {activeView === 'context' && selectedProjectId && (
-                  <Context projectId={selectedProjectId} />
+                {activeView === 'context' && (activeProjectId || selectedProjectId) && (
+                  <Context projectId={activeProjectId || selectedProjectId!} />
                 )}
-                {activeView === 'ideation' && selectedProjectId && (
-                  <Ideation projectId={selectedProjectId} onGoToTask={handleGoToTask} />
+                {activeView === 'ideation' && (activeProjectId || selectedProjectId) && (
+                  <Ideation projectId={activeProjectId || selectedProjectId!} onGoToTask={handleGoToTask} />
                 )}
-                {activeView === 'insights' && selectedProjectId && (
-                  <Insights projectId={selectedProjectId} />
+                {activeView === 'insights' && (activeProjectId || selectedProjectId) && (
+                  <Insights projectId={activeProjectId || selectedProjectId!} />
                 )}
-                {activeView === 'github-issues' && selectedProjectId && (
+                {activeView === 'github-issues' && (activeProjectId || selectedProjectId) && (
                   <GitHubIssues
                     onOpenSettings={() => {
                       setSettingsInitialProjectSection('github');
@@ -348,14 +657,11 @@ export function App() {
                     onNavigateToTask={handleGoToTask}
                   />
                 )}
-                {activeView === 'changelog' && selectedProjectId && (
+                {activeView === 'changelog' && (activeProjectId || selectedProjectId) && (
                   <Changelog />
                 )}
-                {activeView === 'worktrees' && selectedProjectId && (
-                  <Worktrees projectId={selectedProjectId} />
-                )}
-                {activeView === 'agent-profiles' && (
-                  <AgentProfiles />
+                {activeView === 'worktrees' && (activeProjectId || selectedProjectId) && (
+                  <Worktrees projectId={activeProjectId || selectedProjectId!} />
                 )}
                 {activeView === 'agent-tools' && (
                   <div className="flex h-full items-center justify-center">
@@ -373,21 +679,25 @@ export function App() {
                 projects={projects}
                 onNewProject={handleAddProject}
                 onOpenProject={handleAddProject}
-                onSelectProject={(projectId) => useProjectStore.getState().selectProject(projectId)}
+                onSelectProject={(projectId) => {
+                  openProjectTab(projectId);
+                }}
               />
             )}
           </main>
         </div>
 
-        {/* Task detail panel */}
-        {selectedTask && (
-          <TaskDetailPanel task={selectedTask} onClose={handleCloseTaskDetail} />
-        )}
+        {/* Task detail modal */}
+        <TaskDetailModal
+          open={!!selectedTask}
+          task={selectedTask}
+          onOpenChange={(open) => !open && handleCloseTaskDetail()}
+        />
 
         {/* Dialogs */}
-        {selectedProjectId && (
+        {(activeProjectId || selectedProjectId) && (
           <TaskCreationWizard
-            projectId={selectedProjectId}
+            projectId={activeProjectId || selectedProjectId!}
             open={isNewTaskDialogOpen}
             onOpenChange={setIsNewTaskDialogOpen}
           />
@@ -417,7 +727,10 @@ export function App() {
 
         {/* Initialize Auto Claude Dialog */}
         <Dialog open={showInitDialog} onOpenChange={(open) => {
-          if (!open) {
+          console.log('[InitDialog] onOpenChange called', { open, pendingProject: !!pendingProject, isInitializing, initSuccess });
+          // Only trigger skip if user manually closed the dialog
+          // Don't trigger if: successful init, no pending project, or currently initializing
+          if (!open && pendingProject && !isInitializing && !initSuccess) {
             handleSkipInit();
           }
         }}>
@@ -453,6 +766,19 @@ export function App() {
                   </div>
                 </div>
               )}
+              {initError && (
+                <div className="mt-4 rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
+                    <div>
+                      <p className="font-medium text-destructive">Initialization Failed</p>
+                      <p className="text-muted-foreground mt-1">
+                        {initError}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={handleSkipInit} disabled={isInitializing}>
@@ -477,6 +803,17 @@ export function App() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* GitHub Setup Modal - shows after Auto Claude init to configure GitHub */}
+        {gitHubSetupProject && (
+          <GitHubSetupModal
+            open={showGitHubSetup}
+            onOpenChange={setShowGitHubSetup}
+            project={gitHubSetupProject}
+            onComplete={handleGitHubSetupComplete}
+            onSkip={handleGitHubSetupSkip}
+          />
+        )}
 
         {/* Rate Limit Modal - shows when Claude Code hits usage limits (terminal) */}
         <RateLimitModal />

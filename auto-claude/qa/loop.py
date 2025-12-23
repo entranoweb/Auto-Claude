@@ -9,7 +9,7 @@ approval or max iterations.
 import time as time_module
 from pathlib import Path
 
-from client import create_client
+from core.client import create_client
 from debug import debug, debug_error, debug_section, debug_success, debug_warning
 from linear_updater import (
     LinearTaskState,
@@ -19,6 +19,7 @@ from linear_updater import (
     linear_qa_rejected,
     linear_qa_started,
 )
+from phase_config import get_phase_model, get_phase_thinking_budget
 from progress import count_subtasks, is_build_complete
 from task_logger import (
     LogPhase,
@@ -44,6 +45,7 @@ from .reviewer import run_qa_agent_session
 
 # Configuration
 MAX_QA_ITERATIONS = 50
+MAX_CONSECUTIVE_ERRORS = 3  # Stop after 3 consecutive errors without progress
 
 
 # =============================================================================
@@ -107,11 +109,59 @@ async def run_qa_validation_loop(
         print(f"   Progress: {completed}/{total} subtasks completed")
         return False
 
-    # Check if already approved
-    if is_qa_approved(spec_dir):
+    # Check if there's pending human feedback that needs to be processed
+    fix_request_file = spec_dir / "QA_FIX_REQUEST.md"
+    has_human_feedback = fix_request_file.exists()
+
+    # Check if already approved - but if there's human feedback, we need to process it first
+    if is_qa_approved(spec_dir) and not has_human_feedback:
         debug_success("qa_loop", "Build already approved by QA")
         print("\n✅ Build already approved by QA.")
         return True
+
+    # If there's human feedback, we need to run the fixer first before re-validating
+    if has_human_feedback:
+        debug(
+            "qa_loop",
+            "Human feedback detected - will run fixer first",
+            fix_request_file=str(fix_request_file),
+        )
+        print("\n📝 Human feedback detected. Running QA Fixer first...")
+
+        # Get model and thinking budget for fixer (uses QA phase config)
+        qa_model = get_phase_model(spec_dir, "qa", model)
+        fixer_thinking_budget = get_phase_thinking_budget(spec_dir, "qa")
+
+        fix_client = create_client(
+            project_dir,
+            spec_dir,
+            qa_model,
+            agent_type="qa_fixer",
+            max_thinking_tokens=fixer_thinking_budget,
+        )
+
+        async with fix_client:
+            fix_status, fix_response = await run_qa_fixer_session(
+                fix_client,
+                spec_dir,
+                0,
+                False,  # iteration 0 for human feedback
+            )
+
+        if fix_status == "error":
+            debug_error("qa_loop", f"Fixer error: {fix_response[:200]}")
+            print(f"\n❌ Fixer encountered error: {fix_response}")
+            return False
+
+        debug_success("qa_loop", "Human feedback fixes applied")
+        print("\n✅ Fixes applied based on human feedback. Running QA validation...")
+
+        # Remove the fix request file after processing
+        try:
+            fix_request_file.unlink()
+            debug("qa_loop", "Removed processed QA_FIX_REQUEST.md")
+        except OSError:
+            pass  # Ignore if file removal fails
 
     # Check for no-test projects
     if is_no_test_project(spec_dir, project_dir):
@@ -136,6 +186,8 @@ async def run_qa_validation_loop(
             print("Linear task moved to 'In Review'")
 
     qa_iteration = get_qa_iteration_count(spec_dir)
+    consecutive_errors = 0
+    last_error_context = None  # Track error for self-correction feedback
 
     while qa_iteration < MAX_QA_ITERATIONS:
         qa_iteration += 1
@@ -151,26 +203,49 @@ async def run_qa_validation_loop(
 
         print(f"\n--- QA Iteration {qa_iteration}/{MAX_QA_ITERATIONS} ---")
 
-        # Run QA reviewer
-        debug("qa_loop", "Creating client for QA reviewer session...")
-        client = create_client(project_dir, spec_dir, model)
+        # Run QA reviewer with phase-specific model and thinking budget
+        qa_model = get_phase_model(spec_dir, "qa", model)
+        qa_thinking_budget = get_phase_thinking_budget(spec_dir, "qa")
+        debug(
+            "qa_loop",
+            "Creating client for QA reviewer session...",
+            model=qa_model,
+            thinking_budget=qa_thinking_budget,
+        )
+        client = create_client(
+            project_dir,
+            spec_dir,
+            qa_model,
+            agent_type="qa_reviewer",
+            max_thinking_tokens=qa_thinking_budget,
+        )
 
         async with client:
             debug("qa_loop", "Running QA reviewer agent session...")
             status, response = await run_qa_agent_session(
-                client, spec_dir, qa_iteration, MAX_QA_ITERATIONS, verbose
+                client,
+                project_dir,  # Pass project_dir for capability-based tool injection
+                spec_dir,
+                qa_iteration,
+                MAX_QA_ITERATIONS,
+                verbose,
+                previous_error=last_error_context,  # Pass error context for self-correction
             )
 
         iteration_duration = time_module.time() - iteration_start
         debug(
             "qa_loop",
-            f"QA reviewer session completed",
+            "QA reviewer session completed",
             status=status,
             duration_seconds=f"{iteration_duration:.1f}",
             response_length=len(response),
         )
 
         if status == "approved":
+            # Reset error tracking on success
+            consecutive_errors = 0
+            last_error_context = None
+
             # Record successful iteration
             debug_success(
                 "qa_loop",
@@ -205,6 +280,10 @@ async def run_qa_validation_loop(
             return True
 
         elif status == "rejected":
+            # Reset error tracking on valid response (rejected is a valid response)
+            consecutive_errors = 0
+            last_error_context = None
+
             debug_warning(
                 "qa_loop",
                 "QA REJECTED",
@@ -278,11 +357,23 @@ async def run_qa_validation_loop(
                 print("Escalating to human review.")
                 break
 
-            # Run fixer
-            debug("qa_loop", "Starting QA fixer session...")
+            # Run fixer with phase-specific thinking budget
+            fixer_thinking_budget = get_phase_thinking_budget(spec_dir, "qa")
+            debug(
+                "qa_loop",
+                "Starting QA fixer session...",
+                model=qa_model,
+                thinking_budget=fixer_thinking_budget,
+            )
             print("\nRunning QA Fixer Agent...")
 
-            fix_client = create_client(project_dir, spec_dir, model)
+            fix_client = create_client(
+                project_dir,
+                spec_dir,
+                qa_model,
+                agent_type="qa_fixer",
+                max_thinking_tokens=fixer_thinking_budget,
+            )
 
             async with fix_client:
                 fix_status, fix_response = await run_qa_fixer_session(
@@ -311,15 +402,57 @@ async def run_qa_validation_loop(
             print("\n✅ Fixes applied. Re-running QA validation...")
 
         elif status == "error":
-            debug_error("qa_loop", f"QA session error: {response[:200]}")
+            consecutive_errors += 1
+            debug_error(
+                "qa_loop",
+                f"QA session error: {response[:200]}",
+                consecutive_errors=consecutive_errors,
+                max_consecutive=MAX_CONSECUTIVE_ERRORS,
+            )
             print(f"\n❌ QA error: {response}")
+            print(
+                f"   Consecutive errors: {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}"
+            )
             record_iteration(
                 spec_dir,
                 qa_iteration,
                 "error",
                 [{"title": "QA error", "description": response}],
             )
-            print("Retrying...")
+
+            # Build error context for self-correction in next iteration
+            last_error_context = {
+                "error_type": "missing_implementation_plan_update",
+                "error_message": response,
+                "consecutive_errors": consecutive_errors,
+                "expected_action": "You MUST update implementation_plan.json with a qa_signoff object containing 'status': 'approved' or 'status': 'rejected'",
+                "file_path": str(spec_dir / "implementation_plan.json"),
+            }
+
+            # Check if we've hit max consecutive errors
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                debug_error(
+                    "qa_loop",
+                    f"Max consecutive errors ({MAX_CONSECUTIVE_ERRORS}) reached - escalating to human",
+                )
+                print(
+                    f"\n⚠️  {MAX_CONSECUTIVE_ERRORS} consecutive errors without progress."
+                )
+                print(
+                    "The QA agent is unable to properly update implementation_plan.json."
+                )
+                print("Escalating to human review.")
+
+                # End validation phase as failed
+                if task_logger:
+                    task_logger.end_phase(
+                        LogPhase.VALIDATION,
+                        success=False,
+                        message=f"QA agent failed {MAX_CONSECUTIVE_ERRORS} consecutive times - unable to update implementation_plan.json",
+                    )
+                return False
+
+            print("Retrying with error feedback...")
 
     # Max iterations reached without approval
     debug_error(

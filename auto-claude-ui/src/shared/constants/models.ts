@@ -3,7 +3,7 @@
  * Claude models, thinking levels, memory backends, and agent profiles
  */
 
-import type { AgentProfile } from '../types/settings';
+import type { AgentProfile, PhaseModelConfig, FeatureModelConfig, FeatureThinkingConfig } from '../types/settings';
 
 // ============================================
 // Available Models
@@ -19,7 +19,7 @@ export const AVAILABLE_MODELS = [
 export const MODEL_ID_MAP: Record<string, string> = {
   opus: 'claude-opus-4-5-20251101',
   sonnet: 'claude-sonnet-4-5-20250929',
-  haiku: 'claude-haiku-4-5-20250929'
+  haiku: 'claude-haiku-4-5-20251001'
 } as const;
 
 // Maps thinking levels to budget tokens (null = no extended thinking)
@@ -48,8 +48,61 @@ export const THINKING_LEVELS = [
 // Agent Profiles
 // ============================================
 
+// Default phase model configuration for Auto profile
+// Uses Opus across all phases for maximum quality
+export const DEFAULT_PHASE_MODELS: PhaseModelConfig = {
+  spec: 'opus',       // Best quality for spec creation
+  planning: 'opus',   // Complex architecture decisions benefit from Opus
+  coding: 'opus',     // Highest quality implementation
+  qa: 'opus'          // Thorough QA review
+};
+
+// Default phase thinking configuration for Auto profile
+export const DEFAULT_PHASE_THINKING: import('../types/settings').PhaseThinkingConfig = {
+  spec: 'ultrathink',   // Deep thinking for comprehensive spec creation
+  planning: 'high',     // High thinking for planning complex features
+  coding: 'low',        // Faster coding iterations
+  qa: 'low'             // Efficient QA review
+};
+
+// ============================================
+// Feature Settings (Non-Pipeline Features)
+// ============================================
+
+// Default feature model configuration (for insights, ideation, roadmap)
+export const DEFAULT_FEATURE_MODELS: FeatureModelConfig = {
+  insights: 'sonnet',   // Fast, responsive chat
+  ideation: 'opus',     // Creative ideation benefits from Opus
+  roadmap: 'opus'       // Strategic planning benefits from Opus
+};
+
+// Default feature thinking configuration
+export const DEFAULT_FEATURE_THINKING: FeatureThinkingConfig = {
+  insights: 'medium',   // Balanced thinking for chat
+  ideation: 'high',     // Deep thinking for creative ideas
+  roadmap: 'high'       // Strategic thinking for roadmap
+};
+
+// Feature labels for UI display
+export const FEATURE_LABELS: Record<keyof FeatureModelConfig, { label: string; description: string }> = {
+  insights: { label: 'Insights Chat', description: 'Ask questions about your codebase' },
+  ideation: { label: 'Ideation', description: 'Generate feature ideas and improvements' },
+  roadmap: { label: 'Roadmap', description: 'Create strategic feature roadmaps' }
+};
+
 // Default agent profiles for preset model/thinking configurations
 export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
+  {
+    id: 'auto',
+    name: 'Auto (Optimized)',
+    description: 'Uses Opus across all phases with optimized thinking levels',
+    model: 'opus',  // Fallback/default model
+    thinkingLevel: 'high',
+    icon: 'Sparkles',
+    isAutoProfile: true,
+    phaseModels: DEFAULT_PHASE_MODELS,
+    phaseThinking: DEFAULT_PHASE_THINKING
+  },
   {
     id: 'complex',
     name: 'Complex Tasks',
@@ -82,5 +135,5 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
 
 export const MEMORY_BACKENDS = [
   { value: 'file', label: 'File-based (default)' },
-  { value: 'graphiti', label: 'Graphiti (FalkorDB)' }
+  { value: 'graphiti', label: 'Graphiti (LadybugDB)' }
 ] as const;

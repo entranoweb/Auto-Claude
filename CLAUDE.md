@@ -81,6 +81,21 @@ auto-claude/.venv/bin/pytest tests/ -m "not slow"
 python auto-claude/validate_spec.py --spec-dir auto-claude/specs/001-feature --checkpoint all
 ```
 
+### Releases
+```bash
+# Automated version bump and release (recommended)
+node scripts/bump-version.js patch   # 2.5.5 -> 2.5.6
+node scripts/bump-version.js minor   # 2.5.5 -> 2.6.0
+node scripts/bump-version.js major   # 2.5.5 -> 3.0.0
+node scripts/bump-version.js 2.6.0   # Set specific version
+
+# Then push to trigger GitHub release workflows
+git push origin main
+git push origin v2.6.0
+```
+
+See [RELEASE.md](RELEASE.md) for detailed release process documentation.
+
 ## Architecture
 
 ### Core Pipeline
@@ -103,7 +118,7 @@ python auto-claude/validate_spec.py --spec-dir auto-claude/specs/001-feature --c
 - **worktree.py** - Git worktree isolation for safe feature development
 - **memory.py** - File-based session memory (primary, always-available storage)
 - **graphiti_memory.py** - Optional graph-based cross-session memory with semantic search
-- **graphiti_providers.py** - Multi-provider factory for Graphiti (OpenAI, Anthropic, Azure, Ollama)
+- **graphiti_providers.py** - Multi-provider factory for Graphiti (OpenAI, Anthropic, Azure, Ollama, Google AI)
 - **graphiti_config.py** - Configuration and validation for Graphiti integration
 - **linear_updater.py** - Optional Linear integration for progress tracking
 
@@ -174,11 +189,17 @@ Dual-layer memory architecture:
 - Session insights, patterns, gotchas, codebase map
 
 **Graphiti Memory (Optional Enhancement)** - `graphiti_memory.py`
-- Graph database with semantic search (FalkorDB)
+- Graph database with semantic search (LadybugDB - embedded, no Docker)
 - Cross-session context retrieval
-- Multi-provider support (V2):
-  - LLM: OpenAI, Anthropic, Azure OpenAI, Ollama
-  - Embedders: OpenAI, Voyage AI, Azure OpenAI, Ollama
+- Requires Python 3.12+
+- Multi-provider support:
+  - LLM: OpenAI, Anthropic, Azure OpenAI, Ollama, Google AI (Gemini)
+  - Embedders: OpenAI, Voyage AI, Azure OpenAI, Ollama, Google AI
+
+```bash
+# Setup (requires Python 3.12+)
+pip install real_ladybug graphiti-core
+```
 
 Enable with: `GRAPHITI_ENABLED=true` + provider credentials. See `.env.example`.
 

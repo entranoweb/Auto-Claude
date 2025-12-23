@@ -5,11 +5,13 @@ import { AgentState } from './agent-state';
 import { AgentEvents } from './agent-events';
 import { AgentProcessManager } from './agent-process';
 import { AgentQueueManager } from './agent-queue';
+import { getClaudeProfileManager } from '../claude-profile-manager';
 import {
   SpecCreationMetadata,
   TaskExecutionOptions,
-  IdeationConfig
+  RoadmapConfig
 } from './types';
+import type { IdeationConfig } from '../../shared/types';
 
 /**
  * Main AgentManager - orchestrates agent process lifecycle
@@ -41,8 +43,10 @@ export class AgentManager extends EventEmitter {
     this.queueManager = new AgentQueueManager(this.state, this.events, this.processManager, this);
 
     // Listen for auto-swap restart events
-    this.on('auto-swap-restart-task', (taskId: string, _newProfileId: string) => {
-      this.restartTask(taskId);
+    this.on('auto-swap-restart-task', (taskId: string, newProfileId: string) => {
+      console.log('[AgentManager] Received auto-swap-restart-task event:', { taskId, newProfileId });
+      const success = this.restartTask(taskId, newProfileId);
+      console.log('[AgentManager] Task restart result:', success ? 'SUCCESS' : 'FAILED');
     });
 
     // Listen for task completion to clean up context (prevent memory leak)
@@ -89,6 +93,13 @@ export class AgentManager extends EventEmitter {
     specDir?: string,
     metadata?: SpecCreationMetadata
   ): void {
+    // Pre-flight auth check: Verify active profile has valid authentication
+    const profileManager = getClaudeProfileManager();
+    if (!profileManager.hasValidAuth()) {
+      this.emit('error', taskId, 'Claude authentication required. Please authenticate in Settings > Claude Profiles before starting tasks.');
+      return;
+    }
+
     const autoBuildSource = this.processManager.getAutoBuildSourcePath();
 
     if (!autoBuildSource) {
@@ -120,6 +131,20 @@ export class AgentManager extends EventEmitter {
       args.push('--auto-approve');
     }
 
+    // Pass model and thinking level configuration
+    // For auto profile, use phase-specific config; otherwise use single model/thinking
+    if (metadata?.isAutoProfile && metadata.phaseModels && metadata.phaseThinking) {
+      // Pass the spec phase model and thinking level to spec_runner
+      args.push('--model', metadata.phaseModels.spec);
+      args.push('--thinking-level', metadata.phaseThinking.spec);
+    } else if (metadata?.model) {
+      // Non-auto profile: use single model and thinking level
+      args.push('--model', metadata.model);
+      if (metadata.thinkingLevel) {
+        args.push('--thinking-level', metadata.thinkingLevel);
+      }
+    }
+
     // Store context for potential restart
     this.storeTaskContext(taskId, projectPath, '', {}, true, taskDescription, specDir, metadata);
 
@@ -136,6 +161,13 @@ export class AgentManager extends EventEmitter {
     specId: string,
     options: TaskExecutionOptions = {}
   ): void {
+    // Pre-flight auth check: Verify active profile has valid authentication
+    const profileManager = getClaudeProfileManager();
+    if (!profileManager.hasValidAuth()) {
+      this.emit('error', taskId, 'Claude authentication required. Please authenticate in Settings > Claude Profiles before starting tasks.');
+      return;
+    }
+
     const autoBuildSource = this.processManager.getAutoBuildSourcePath();
 
     if (!autoBuildSource) {
@@ -168,6 +200,8 @@ export class AgentManager extends EventEmitter {
 
     // Note: --parallel was removed from run.py CLI - parallel execution is handled internally by the agent
     // The options.parallel and options.workers are kept for future use or logging purposes
+    // Note: Model configuration is read from task_metadata.json by the Python scripts,
+    // which allows per-phase configuration for planner, coder, and QA phases
 
     // Store context for potential restart
     this.storeTaskContext(taskId, projectPath, specId, options, false);
@@ -212,9 +246,11 @@ export class AgentManager extends EventEmitter {
     projectId: string,
     projectPath: string,
     refresh: boolean = false,
-    enableCompetitorAnalysis: boolean = false
+    enableCompetitorAnalysis: boolean = false,
+    refreshCompetitorAnalysis: boolean = false,
+    config?: RoadmapConfig
   ): void {
-    this.queueManager.startRoadmapGeneration(projectId, projectPath, refresh, enableCompetitorAnalysis);
+    this.queueManager.startRoadmapGeneration(projectId, projectPath, refresh, enableCompetitorAnalysis, refreshCompetitorAnalysis, config);
   }
 
   /**
@@ -316,28 +352,56 @@ export class AgentManager extends EventEmitter {
 
   /**
    * Restart task after profile swap
+   * @param taskId - The task to restart
+   * @param newProfileId - Optional new profile ID to apply (from auto-swap)
    */
-  restartTask(taskId: string): boolean {
+  restartTask(taskId: string, newProfileId?: string): boolean {
+    console.log('[AgentManager] restartTask called for:', taskId, 'with newProfileId:', newProfileId);
+
     const context = this.taskExecutionContext.get(taskId);
     if (!context) {
       console.error('[AgentManager] No context for task:', taskId);
+      console.log('[AgentManager] Available task contexts:', Array.from(this.taskExecutionContext.keys()));
       return false;
     }
 
+    console.log('[AgentManager] Task context found:', {
+      taskId,
+      projectPath: context.projectPath,
+      specId: context.specId,
+      isSpecCreation: context.isSpecCreation,
+      swapCount: context.swapCount
+    });
+
     // Prevent infinite swap loops
     if (context.swapCount >= 2) {
-      console.error('[AgentManager] Max swap count reached for task:', taskId);
+      console.error('[AgentManager] Max swap count reached for task:', taskId, '- stopping restart loop');
       return false;
     }
 
     context.swapCount++;
+    console.log('[AgentManager] Incremented swap count to:', context.swapCount);
+
+    // If a new profile was specified, ensure it's set as active before restart
+    if (newProfileId) {
+      const profileManager = getClaudeProfileManager();
+      const currentActiveId = profileManager.getActiveProfile()?.id;
+      if (currentActiveId !== newProfileId) {
+        console.log('[AgentManager] Setting active profile to:', newProfileId);
+        profileManager.setActiveProfile(newProfileId);
+      }
+    }
 
     // Kill current process
+    console.log('[AgentManager] Killing current process for task:', taskId);
     this.killTask(taskId);
 
     // Wait for cleanup, then restart
+    console.log('[AgentManager] Scheduling task restart in 500ms');
     setTimeout(() => {
+      console.log('[AgentManager] Restarting task now:', taskId);
       if (context.isSpecCreation) {
+        console.log('[AgentManager] Restarting as spec creation');
         this.startSpecCreation(
           taskId,
           context.projectPath,
@@ -346,6 +410,7 @@ export class AgentManager extends EventEmitter {
           context.metadata
         );
       } else {
+        console.log('[AgentManager] Restarting as task execution');
         this.startTaskExecution(
           taskId,
           context.projectPath,

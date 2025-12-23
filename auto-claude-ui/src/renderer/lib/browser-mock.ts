@@ -53,15 +53,20 @@ const browserMockAPI: ElectronAPI = {
     data: null
   }),
 
+  getRoadmapStatus: async () => ({
+    success: true,
+    data: { isRunning: false }
+  }),
+
   saveRoadmap: async () => ({
     success: true
   }),
 
-  generateRoadmap: () => {
+  generateRoadmap: (_projectId: string, _enableCompetitorAnalysis?: boolean, _refreshCompetitorAnalysis?: boolean) => {
     console.warn('[Browser Mock] generateRoadmap called');
   },
 
-  refreshRoadmap: () => {
+  refreshRoadmap: (_projectId: string, _enableCompetitorAnalysis?: boolean, _refreshCompetitorAnalysis?: boolean) => {
     console.warn('[Browser Mock] refreshRoadmap called');
   },
 

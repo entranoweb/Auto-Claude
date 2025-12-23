@@ -178,5 +178,35 @@ export const integrationMock = {
         { fullName: 'user/private-repo', description: 'A private repository', isPrivate: true }
       ]
     }
+  }),
+
+  detectGitHubRepo: async () => ({
+    success: true,
+    data: 'user/example-repo'
+  }),
+
+  getGitHubBranches: async () => ({
+    success: true,
+    data: ['main', 'develop', 'feature/example']
+  }),
+
+  createGitHubRepo: async (_repoName: string, _options: { description?: string; isPrivate?: boolean; projectPath: string; owner?: string }) => ({
+    success: false,
+    error: 'Not available in browser mock'
+  }),
+
+  addGitRemote: async (_projectPath: string, _repoFullName: string) => ({
+    success: false,
+    error: 'Not available in browser mock'
+  }),
+
+  listGitHubOrgs: async () => ({
+    success: true,
+    data: {
+      orgs: [
+        { login: 'example-org', avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4' },
+        { login: 'another-org', avatarUrl: 'https://avatars.githubusercontent.com/u/2?v=4' }
+      ]
+    }
   })
 };

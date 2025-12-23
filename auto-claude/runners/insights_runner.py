@@ -133,7 +133,7 @@ async def run_with_sdk(
     message: str,
     history: list,
     model: str = "claude-sonnet-4-5-20250929",
-    thinking_level: str = "medium"
+    thinking_level: str = "medium",
 ) -> None:
     """Run the chat using Claude SDK with streaming."""
     if not SDK_AVAILABLE:
@@ -332,15 +332,18 @@ def main():
     parser.add_argument("--message", required=True, help="User message")
     parser.add_argument("--history", default="[]", help="JSON conversation history")
     parser.add_argument(
+        "--history-file", help="Path to JSON file containing conversation history"
+    )
+    parser.add_argument(
         "--model",
         default="claude-sonnet-4-5-20250929",
-        help="Claude model ID (default: claude-sonnet-4-5-20250929)"
+        help="Claude model ID (default: claude-sonnet-4-5-20250929)",
     )
     parser.add_argument(
         "--thinking-level",
         default="medium",
         choices=["none", "low", "medium", "high", "ultrathink"],
-        help="Thinking level for extended reasoning (default: medium)"
+        help="Thinking level for extended reasoning (default: medium)",
     )
     args = parser.parse_args()
 
@@ -360,11 +363,26 @@ def main():
         thinking_level=thinking_level,
     )
 
+    # Load history from file if provided, otherwise parse inline JSON
     try:
-        history = json.loads(args.history)
-        debug_detailed("insights_runner", "Parsed history", history_length=len(history))
-    except json.JSONDecodeError:
-        debug_error("insights_runner", "Failed to parse history JSON")
+        if args.history_file:
+            debug(
+                "insights_runner", "Loading history from file", file=args.history_file
+            )
+            with open(args.history_file, encoding="utf-8") as f:
+                history = json.load(f)
+            debug_detailed(
+                "insights_runner",
+                "Loaded history from file",
+                history_length=len(history),
+            )
+        else:
+            history = json.loads(args.history)
+            debug_detailed(
+                "insights_runner", "Parsed inline history", history_length=len(history)
+            )
+    except (json.JSONDecodeError, FileNotFoundError, OSError) as e:
+        debug_error("insights_runner", f"Failed to load history: {e}")
         history = []
 
     # Run the async SDK function

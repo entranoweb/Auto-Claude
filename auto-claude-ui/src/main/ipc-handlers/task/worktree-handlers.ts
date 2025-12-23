@@ -2,13 +2,34 @@ import { ipcMain, BrowserWindow } from 'electron';
 import { IPC_CHANNELS, AUTO_BUILD_PATHS } from '../../../shared/constants';
 import type { IPCResult, WorktreeStatus, WorktreeDiff, WorktreeDiffFile, WorktreeMergeResult, WorktreeDiscardResult, WorktreeListResult, WorktreeListItem } from '../../../shared/types';
 import path from 'path';
-import { existsSync, readdirSync, statSync } from 'fs';
-import { execSync, spawn } from 'child_process';
+import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
+import { execSync, spawn, spawnSync } from 'child_process';
 import { projectStore } from '../../project-store';
 import { PythonEnvManager } from '../../python-env-manager';
 import { getEffectiveSourcePath } from '../../auto-claude-updater';
 import { getProfileEnv } from '../../rate-limit-detector';
 import { findTaskAndProject } from './shared';
+import { findPythonCommand, parsePythonCommand } from '../../python-detector';
+
+/**
+ * Read the stored base branch from task_metadata.json
+ * This is the branch the task was created from (set by user during task creation)
+ */
+function getTaskBaseBranch(specDir: string): string | undefined {
+  try {
+    const metadataPath = path.join(specDir, 'task_metadata.json');
+    if (existsSync(metadataPath)) {
+      const metadata = JSON.parse(readFileSync(metadataPath, 'utf-8'));
+      // Return baseBranch if explicitly set (not the __project_default__ marker)
+      if (metadata.baseBranch && metadata.baseBranch !== '__project_default__') {
+        return metadata.baseBranch;
+      }
+    }
+  } catch (e) {
+    console.warn('[getTaskBaseBranch] Failed to read task metadata:', e);
+  }
+  return undefined;
+}
 
 /**
  * Register worktree management handlers
@@ -48,24 +69,25 @@ export function registerWorktreeHandlers(
             encoding: 'utf-8'
           }).trim();
 
-          // Get base branch (usually main or master)
+          // Get base branch - the current branch in the main project (where changes will be merged)
+          // This matches the Python merge logic which merges into the user's current branch
           let baseBranch = 'main';
           try {
-            // Try to get the default branch
-            baseBranch = execSync('git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo main', {
+            baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
               cwd: project.path,
               encoding: 'utf-8'
-            }).trim().replace('origin/', '');
+            }).trim();
           } catch {
             baseBranch = 'main';
           }
 
-          // Get commit count
+          // Get commit count (cross-platform - no shell syntax)
           let commitCount = 0;
           try {
-            const countOutput = execSync(`git rev-list --count ${baseBranch}..HEAD 2>/dev/null || echo 0`, {
+            const countOutput = execSync(`git rev-list --count ${baseBranch}..HEAD`, {
               cwd: worktreePath,
-              encoding: 'utf-8'
+              encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe']
             }).trim();
             commitCount = parseInt(countOutput, 10) || 0;
           } catch {
@@ -77,10 +99,12 @@ export function registerWorktreeHandlers(
           let additions = 0;
           let deletions = 0;
 
+          let diffStat = '';
           try {
-            const diffStat = execSync(`git diff --stat ${baseBranch}...HEAD 2>/dev/null || echo ""`, {
+            diffStat = execSync(`git diff --stat ${baseBranch}...HEAD`, {
               cwd: worktreePath,
-              encoding: 'utf-8'
+              encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe']
             }).trim();
 
             // Parse the summary line (e.g., "3 files changed, 50 insertions(+), 10 deletions(-)")
@@ -144,13 +168,13 @@ export function registerWorktreeHandlers(
           return { success: false, error: 'No worktree found for this task' };
         }
 
-        // Get base branch
+        // Get base branch - the current branch in the main project (where changes will be merged)
         let baseBranch = 'main';
         try {
-          baseBranch = execSync('git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo main', {
+          baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
             cwd: project.path,
             encoding: 'utf-8'
-          }).trim().replace('origin/', '');
+          }).trim();
         } catch {
           baseBranch = 'main';
         }
@@ -158,17 +182,21 @@ export function registerWorktreeHandlers(
         // Get the diff with file stats
         const files: WorktreeDiffFile[] = [];
 
+        let numstat = '';
+        let nameStatus = '';
         try {
-          // Get numstat for additions/deletions per file
-          const numstat = execSync(`git diff --numstat ${baseBranch}...HEAD 2>/dev/null || echo ""`, {
+          // Get numstat for additions/deletions per file (cross-platform)
+          numstat = execSync(`git diff --numstat ${baseBranch}...HEAD`, {
             cwd: worktreePath,
-            encoding: 'utf-8'
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe']
           }).trim();
 
-          // Get name-status for file status
-          const nameStatus = execSync(`git diff --name-status ${baseBranch}...HEAD 2>/dev/null || echo ""`, {
+          // Get name-status for file status (cross-platform)
+          nameStatus = execSync(`git diff --name-status ${baseBranch}...HEAD`, {
             cwd: worktreePath,
-            encoding: 'utf-8'
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe']
           }).trim();
 
           // Parse name-status to get file statuses
@@ -272,6 +300,31 @@ export function registerWorktreeHandlers(
         const worktreePath = path.join(project.path, '.worktrees', task.specId);
         debug('Worktree path:', worktreePath, 'exists:', existsSync(worktreePath));
 
+        // Check if changes are already staged (for stage-only mode)
+        if (options?.noCommit) {
+          const stagedResult = spawnSync('git', ['diff', '--staged', '--name-only'], {
+            cwd: project.path,
+            encoding: 'utf-8'
+          });
+
+          if (stagedResult.status === 0 && stagedResult.stdout?.trim()) {
+            const stagedFiles = stagedResult.stdout.trim().split('\n');
+            debug('Changes already staged:', stagedFiles.length, 'files');
+            // Return success - changes are already staged
+            return {
+              success: true,
+              data: {
+                success: true,
+                merged: false,
+                message: `Changes already staged (${stagedFiles.length} files). Review with git diff --staged.`,
+                staged: true,
+                alreadyStaged: true,
+                projectPath: project.path
+              }
+            };
+          }
+        }
+
         // Get git status before merge
         try {
           const gitStatusBefore = execSync('git status --short', { cwd: project.path, encoding: 'utf-8' });
@@ -294,7 +347,14 @@ export function registerWorktreeHandlers(
           args.push('--no-commit');
         }
 
-        const pythonPath = pythonEnvManager.getPythonPath() || 'python3';
+        // Add --base-branch if task was created with a specific base branch
+        const taskBaseBranch = getTaskBaseBranch(specDir);
+        if (taskBaseBranch) {
+          args.push('--base-branch', taskBaseBranch);
+          debug('Using stored base branch:', taskBaseBranch);
+        }
+
+        const pythonPath = pythonEnvManager.getPythonPath() || findPythonCommand() || 'python';
         debug('Running command:', pythonPath, args.join(' '));
         debug('Working directory:', sourcePath);
 
@@ -306,11 +366,13 @@ export function registerWorktreeHandlers(
         });
 
         return new Promise((resolve) => {
-          const MERGE_TIMEOUT_MS = 120000; // 2 minutes timeout for merge operations
+          const MERGE_TIMEOUT_MS = 600000; // 10 minutes timeout for AI merge operations with many files
           let timeoutId: NodeJS.Timeout | null = null;
           let resolved = false;
 
-          const mergeProcess = spawn(pythonPath, args, {
+          // Parse Python command to handle space-separated commands like "py -3"
+          const [pythonCommand, pythonBaseArgs] = parsePythonCommand(pythonPath);
+          const mergeProcess = spawn(pythonCommand, [...pythonBaseArgs, ...args], {
             cwd: sourcePath,
             env: {
               ...process.env,
@@ -402,12 +464,93 @@ export function registerWorktreeHandlers(
             if (code === 0) {
               const isStageOnly = options?.noCommit === true;
 
-              // For stage-only: keep in human_review so user commits manually
-              // For full merge: mark as done
-              const newStatus = isStageOnly ? 'human_review' : 'done';
-              const planStatus = isStageOnly ? 'review' : 'completed';
+              // Verify changes were actually staged when stage-only mode is requested
+              // This prevents false positives when merge was already committed previously
+              let hasActualStagedChanges = false;
+              let mergeAlreadyCommitted = false;
 
-              debug('Merge successful. isStageOnly:', isStageOnly, 'newStatus:', newStatus);
+              if (isStageOnly) {
+                try {
+                  const gitDiffStaged = execSync('git diff --staged --stat', { cwd: project.path, encoding: 'utf-8' });
+                  hasActualStagedChanges = gitDiffStaged.trim().length > 0;
+                  debug('Stage-only verification: hasActualStagedChanges:', hasActualStagedChanges);
+
+                  if (!hasActualStagedChanges) {
+                    // Check if worktree branch was already merged (merge commit exists)
+                    const specBranch = `auto-claude/${task.specId}`;
+                    try {
+                      // Check if current branch contains all commits from spec branch
+                      // git merge-base --is-ancestor returns exit code 0 if true, 1 if false
+                      execSync(
+                        `git merge-base --is-ancestor ${specBranch} HEAD`,
+                        { cwd: project.path, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+                      );
+                      // If we reach here, the command succeeded (exit code 0) - branch is merged
+                      mergeAlreadyCommitted = true;
+                      debug('Merge already committed check:', mergeAlreadyCommitted);
+                    } catch {
+                      // Exit code 1 means not merged, or branch may not exist
+                      mergeAlreadyCommitted = false;
+                      debug('Could not check merge status, assuming not merged');
+                    }
+                  }
+                } catch (e) {
+                  debug('Failed to verify staged changes:', e);
+                }
+              }
+
+              // Determine actual status based on verification
+              let newStatus: string;
+              let planStatus: string;
+              let message: string;
+              let staged: boolean;
+
+              if (isStageOnly && !hasActualStagedChanges && mergeAlreadyCommitted) {
+                // Stage-only was requested but merge was already committed previously
+                // Mark as done since changes are already in the branch
+                newStatus = 'done';
+                planStatus = 'completed';
+                message = 'Changes were already merged and committed. Task marked as done.';
+                staged = false;
+                debug('Stage-only requested but merge already committed. Marking as done.');
+              } else if (isStageOnly && !hasActualStagedChanges) {
+                // Stage-only was requested but no changes to stage (and not committed)
+                // This could mean nothing to merge or an error - keep in human_review for investigation
+                newStatus = 'human_review';
+                planStatus = 'review';
+                message = 'No changes to stage. The worktree may have no differences from the current branch.';
+                staged = false;
+                debug('Stage-only requested but no changes to stage.');
+              } else if (isStageOnly) {
+                // Stage-only with actual staged changes - expected success case
+                newStatus = 'human_review';
+                planStatus = 'review';
+                message = 'Changes staged in main project. Review with git status and commit when ready.';
+                staged = true;
+              } else {
+                // Full merge (not stage-only)
+                newStatus = 'done';
+                planStatus = 'completed';
+                message = 'Changes merged successfully';
+                staged = false;
+              }
+
+              debug('Merge result. isStageOnly:', isStageOnly, 'newStatus:', newStatus, 'staged:', staged);
+
+              // Read suggested commit message if staging succeeded
+              let suggestedCommitMessage: string | undefined;
+              if (staged) {
+                const commitMsgPath = path.join(specDir, 'suggested_commit_message.txt');
+                try {
+                  if (existsSync(commitMsgPath)) {
+                    const { readFileSync } = require('fs');
+                    suggestedCommitMessage = readFileSync(commitMsgPath, 'utf-8').trim();
+                    debug('Read suggested commit message:', suggestedCommitMessage?.substring(0, 100));
+                  }
+                } catch (e) {
+                  debug('Failed to read suggested commit message:', e);
+                }
+              }
 
               // Persist the status change to implementation_plan.json
               const planPath = path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
@@ -419,7 +562,7 @@ export function registerWorktreeHandlers(
                   plan.status = newStatus;
                   plan.planStatus = planStatus;
                   plan.updated_at = new Date().toISOString();
-                  if (isStageOnly) {
+                  if (staged) {
                     plan.stagedAt = new Date().toISOString();
                     plan.stagedInMainProject = true;
                   }
@@ -434,17 +577,14 @@ export function registerWorktreeHandlers(
                 mainWindow.webContents.send(IPC_CHANNELS.TASK_STATUS_CHANGE, taskId, newStatus);
               }
 
-              const message = isStageOnly
-                ? 'Changes staged in main project. Review with git status and commit when ready.'
-                : 'Changes merged successfully';
-
               resolve({
                 success: true,
                 data: {
                   success: true,
                   message,
-                  staged: isStageOnly,
-                  projectPath: isStageOnly ? project.path : undefined
+                  staged,
+                  projectPath: staged ? project.path : undefined,
+                  suggestedCommitMessage
                 }
               });
             } else {
@@ -556,6 +696,7 @@ export function registerWorktreeHandlers(
         }
 
         const runScript = path.join(sourcePath, 'run.py');
+        const specDir = path.join(project.path, project.autoBuildPath || '.auto-claude', 'specs', task.specId);
         const args = [
           runScript,
           '--spec', task.specId,
@@ -563,14 +704,23 @@ export function registerWorktreeHandlers(
           '--merge-preview'
         ];
 
-        const pythonPath = pythonEnvManager.getPythonPath() || 'python3';
+        // Add --base-branch if task was created with a specific base branch
+        const taskBaseBranch = getTaskBaseBranch(specDir);
+        if (taskBaseBranch) {
+          args.push('--base-branch', taskBaseBranch);
+          console.warn('[IPC] Using stored base branch for preview:', taskBaseBranch);
+        }
+
+        const pythonPath = pythonEnvManager.getPythonPath() || findPythonCommand() || 'python';
         console.warn('[IPC] Running merge preview:', pythonPath, args.join(' '));
 
         // Get profile environment for consistency
         const previewProfileEnv = getProfileEnv();
 
         return new Promise((resolve) => {
-          const previewProcess = spawn(pythonPath, args, {
+          // Parse Python command to handle space-separated commands like "py -3"
+          const [pythonCommand, pythonBaseArgs] = parsePythonCommand(pythonPath);
+          const previewProcess = spawn(pythonCommand, [...pythonBaseArgs, ...args], {
             cwd: sourcePath,
             env: { ...process.env, ...previewProfileEnv, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', DEBUG: 'true' }
           });
@@ -776,38 +926,41 @@ export function registerWorktreeHandlers(
               encoding: 'utf-8'
             }).trim();
 
-            // Get base branch
+            // Get base branch - the current branch in the main project (where changes will be merged)
             let baseBranch = 'main';
             try {
-              baseBranch = execSync('git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo main', {
+              baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
                 cwd: project.path,
                 encoding: 'utf-8'
-              }).trim().replace('origin/', '');
+              }).trim();
             } catch {
               baseBranch = 'main';
             }
 
-            // Get commit count
+            // Get commit count (cross-platform - no shell syntax)
             let commitCount = 0;
             try {
-              const countOutput = execSync(`git rev-list --count ${baseBranch}..HEAD 2>/dev/null || echo 0`, {
+              const countOutput = execSync(`git rev-list --count ${baseBranch}..HEAD`, {
                 cwd: entryPath,
-                encoding: 'utf-8'
+                encoding: 'utf-8',
+                stdio: ['pipe', 'pipe', 'pipe']
               }).trim();
               commitCount = parseInt(countOutput, 10) || 0;
             } catch {
               commitCount = 0;
             }
 
-            // Get diff stats
+            // Get diff stats (cross-platform - no shell syntax)
             let filesChanged = 0;
             let additions = 0;
             let deletions = 0;
+            let diffStat = '';
 
             try {
-              const diffStat = execSync(`git diff --shortstat ${baseBranch}...HEAD 2>/dev/null || echo ""`, {
+              diffStat = execSync(`git diff --shortstat ${baseBranch}...HEAD`, {
                 cwd: entryPath,
-                encoding: 'utf-8'
+                encoding: 'utf-8',
+                stdio: ['pipe', 'pipe', 'pipe']
               }).trim();
 
               const filesMatch = diffStat.match(/(\d+) files? changed/);

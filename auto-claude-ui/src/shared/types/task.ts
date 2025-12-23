@@ -2,7 +2,7 @@
  * Task-related types
  */
 
-import type { ThinkingLevel } from './settings';
+import type { ThinkingLevel, PhaseModelConfig, PhaseThinkingConfig } from './settings';
 
 export type TaskStatus = 'backlog' | 'in_progress' | 'ai_review' | 'human_review' | 'done';
 
@@ -136,8 +136,12 @@ export interface TaskDraft {
   priority: TaskPriority | '';
   complexity: TaskComplexity | '';
   impact: TaskImpact | '';
+  profileId?: string;  // Agent profile ID ('auto', 'complex', 'balanced', 'quick', 'custom')
   model: ModelType | '';
   thinkingLevel: ThinkingLevel | '';
+  // Auto profile - per-phase configuration
+  phaseModels?: PhaseModelConfig;
+  phaseThinking?: PhaseThinkingConfig;
   images: ImageAttachment[];
   referencedFiles: ReferencedFile[];
   requireReviewBeforeCoding?: boolean;
@@ -209,8 +213,15 @@ export interface TaskMetadata {
   requireReviewBeforeCoding?: boolean;  // Require human review of spec/plan before coding starts
 
   // Agent configuration (from agent profile or manual selection)
-  model?: ModelType;  // Claude model to use (haiku, sonnet, opus)
+  model?: ModelType;  // Claude model to use (haiku, sonnet, opus) - used when not auto profile
   thinkingLevel?: ThinkingLevel;  // Thinking budget level (none, low, medium, high, ultrathink)
+  // Auto profile - per-phase model configuration
+  isAutoProfile?: boolean;  // True when using Auto (Optimized) profile
+  phaseModels?: PhaseModelConfig;  // Per-phase model configuration
+  phaseThinking?: PhaseThinkingConfig;  // Per-phase thinking configuration
+
+  // Git/Worktree configuration
+  baseBranch?: string;  // Override base branch for this task's worktree
 
   // Archive status
   archivedAt?: string;  // ISO date when task was archived
@@ -340,9 +351,13 @@ export interface MergeStats {
 export interface WorktreeMergeResult {
   success: boolean;
   message: string;
+  merged?: boolean;
   conflictFiles?: string[];
   staged?: boolean;
+  alreadyStaged?: boolean;
   projectPath?: string;
+  // AI-generated commit message suggestion (for stage-only mode)
+  suggestedCommitMessage?: string;
   // New conflict info from smart merge
   conflicts?: MergeConflict[];
   stats?: MergeStats;
@@ -422,4 +437,5 @@ export interface TaskStartOptions {
   parallel?: boolean;
   workers?: number;
   model?: string;
+  baseBranch?: string; // Override base branch for worktree creation
 }

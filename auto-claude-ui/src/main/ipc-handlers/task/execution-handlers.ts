@@ -3,10 +3,12 @@ import { IPC_CHANNELS, AUTO_BUILD_PATHS, getSpecsDir } from '../../../shared/con
 import type { IPCResult, TaskStartOptions, TaskStatus } from '../../../shared/types';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { AgentManager } from '../../agent';
 import { fileWatcher } from '../../file-watcher';
 import { findTaskAndProject } from './shared';
 import { checkGitStatus } from '../../project-initializer';
+import { getClaudeProfileManager } from '../../claude-profile-manager';
 
 /**
  * Register task execution handlers (start, stop, review, status management, recovery)
@@ -58,6 +60,18 @@ export function registerTaskExecutionHandlers(
           IPC_CHANNELS.TASK_ERROR,
           taskId,
           'Git repository has no commits. Please make an initial commit first (git add . && git commit -m "Initial commit").'
+        );
+        return;
+      }
+
+      // Check authentication - Claude requires valid auth to run tasks
+      const profileManager = getClaudeProfileManager();
+      if (!profileManager.hasValidAuth()) {
+        console.warn('[TASK_START] No valid authentication for active profile');
+        mainWindow.webContents.send(
+          IPC_CHANNELS.TASK_ERROR,
+          taskId,
+          'Claude authentication required. Please go to Settings > Claude Profiles and authenticate your account, or set an OAuth token.'
         );
         return;
       }
@@ -187,6 +201,11 @@ export function registerTaskExecutionHandlers(
         task.specId
       );
 
+      // Check if worktree exists - QA needs to run in the worktree where the build happened
+      const worktreePath = path.join(project.path, '.worktrees', task.specId);
+      const worktreeSpecDir = path.join(worktreePath, specsBaseDir, task.specId);
+      const hasWorktree = existsSync(worktreePath);
+
       if (approved) {
         // Write approval to QA report
         const qaReportPath = path.join(specDir, AUTO_BUILD_PATHS.QA_REPORT);
@@ -204,15 +223,61 @@ export function registerTaskExecutionHandlers(
           );
         }
       } else {
-        // Write feedback for QA fixer
-        const fixRequestPath = path.join(specDir, 'QA_FIX_REQUEST.md');
+        // Reset and discard all changes from worktree merge in main
+        // The worktree still has all changes, so nothing is lost
+        if (hasWorktree) {
+          // Step 1: Unstage all changes
+          const resetResult = spawnSync('git', ['reset', 'HEAD'], {
+            cwd: project.path,
+            encoding: 'utf-8',
+            stdio: 'pipe'
+          });
+          if (resetResult.status === 0) {
+            console.log('[TASK_REVIEW] Unstaged changes in main');
+          }
+
+          // Step 2: Discard all working tree changes (restore to pre-merge state)
+          const checkoutResult = spawnSync('git', ['checkout', '--', '.'], {
+            cwd: project.path,
+            encoding: 'utf-8',
+            stdio: 'pipe'
+          });
+          if (checkoutResult.status === 0) {
+            console.log('[TASK_REVIEW] Discarded working tree changes in main');
+          }
+
+          // Step 3: Clean untracked files that came from the merge
+          // IMPORTANT: Exclude .auto-claude and .worktrees directories to preserve specs and worktree data
+          const cleanResult = spawnSync('git', ['clean', '-fd', '-e', '.auto-claude', '-e', '.worktrees'], {
+            cwd: project.path,
+            encoding: 'utf-8',
+            stdio: 'pipe'
+          });
+          if (cleanResult.status === 0) {
+            console.log('[TASK_REVIEW] Cleaned untracked files in main (excluding .auto-claude and .worktrees)');
+          }
+
+          console.log('[TASK_REVIEW] Main branch restored to pre-merge state');
+        }
+
+        // Write feedback for QA fixer - write to WORKTREE spec dir if it exists
+        // The QA process runs in the worktree where the build and implementation_plan.json are
+        const targetSpecDir = hasWorktree ? worktreeSpecDir : specDir;
+        const fixRequestPath = path.join(targetSpecDir, 'QA_FIX_REQUEST.md');
+
+        console.warn('[TASK_REVIEW] Writing QA fix request to:', fixRequestPath);
+        console.warn('[TASK_REVIEW] hasWorktree:', hasWorktree, 'worktreePath:', worktreePath);
+
         writeFileSync(
           fixRequestPath,
           `# QA Fix Request\n\nStatus: REJECTED\n\n## Feedback\n\n${feedback || 'No feedback provided'}\n\nCreated at: ${new Date().toISOString()}\n`
         );
 
-        // Restart QA process with dev mode
-        agentManager.startQAProcess(taskId, project.path, task.specId);
+        // Restart QA process - use worktree path if it exists, otherwise main project
+        // The QA process needs to run where the implementation_plan.json with completed subtasks is
+        const qaProjectPath = hasWorktree ? worktreePath : project.path;
+        console.warn('[TASK_REVIEW] Starting QA process with projectPath:', qaProjectPath);
+        agentManager.startQAProcess(taskId, qaProjectPath, task.specId);
 
         const mainWindow = getMainWindow();
         if (mainWindow) {
@@ -262,6 +327,37 @@ export function registerTaskExecutionHandlers(
         } else {
           // No worktree - allow marking as done (limbo state recovery)
           console.log(`[TASK_UPDATE_STATUS] Allowing status 'done' for task ${taskId} (no worktree found - limbo state)`);
+        }
+      }
+
+      // Validate status transition - 'human_review' requires actual work to have been done
+      // This prevents tasks from being incorrectly marked as ready for review when execution failed
+      if (status === 'human_review') {
+        const specsBaseDirForValidation = getSpecsDir(project.autoBuildPath);
+        const specDirForValidation = path.join(
+          project.path,
+          specsBaseDirForValidation,
+          task.specId
+        );
+        const specFilePath = path.join(specDirForValidation, AUTO_BUILD_PATHS.SPEC_FILE);
+
+        // Check if spec.md exists and has meaningful content (at least 100 chars)
+        const MIN_SPEC_CONTENT_LENGTH = 100;
+        let specContent = '';
+        try {
+          if (existsSync(specFilePath)) {
+            specContent = readFileSync(specFilePath, 'utf-8');
+          }
+        } catch {
+          // Ignore read errors - treat as empty spec
+        }
+
+        if (!specContent || specContent.length < MIN_SPEC_CONTENT_LENGTH) {
+          console.warn(`[TASK_UPDATE_STATUS] Blocked attempt to set status 'human_review' for task ${taskId}. No spec has been created yet.`);
+          return {
+            success: false,
+            error: "Cannot move to human review - no spec has been created yet. The task must complete processing before review."
+          };
         }
       }
 
@@ -332,6 +428,20 @@ export function registerTaskExecutionHandlers(
               );
             }
             return { success: false, error: gitStatusCheck.error || 'Git repository required' };
+          }
+
+          // Check authentication before auto-starting
+          const profileManager = getClaudeProfileManager();
+          if (!profileManager.hasValidAuth()) {
+            console.warn('[TASK_UPDATE_STATUS] No valid authentication for active profile');
+            if (mainWindow) {
+              mainWindow.webContents.send(
+                IPC_CHANNELS.TASK_ERROR,
+                taskId,
+                'Claude authentication required. Please go to Settings > Claude Profiles and authenticate your account, or set an OAuth token.'
+              );
+            }
+            return { success: false, error: 'Claude authentication required' };
           }
 
           console.warn('[TASK_UPDATE_STATUS] Auto-starting task:', taskId);
@@ -557,6 +667,23 @@ export function registerTaskExecutionHandlers(
                 recovered: true,
                 newStatus,
                 message: `Task recovered but cannot restart: ${gitStatusForRestart.error || 'Git repository with commits required.'}`,
+                autoRestarted: false
+              }
+            };
+          }
+
+          // Check authentication before auto-restarting
+          const profileManager = getClaudeProfileManager();
+          if (!profileManager.hasValidAuth()) {
+            console.warn('[Recovery] Auth check failed, cannot auto-restart task');
+            // Recovery succeeded but we can't restart without auth
+            return {
+              success: true,
+              data: {
+                taskId,
+                recovered: true,
+                newStatus,
+                message: 'Task recovered but cannot restart: Claude authentication required. Please go to Settings > Claude Profiles and authenticate your account.',
                 autoRestarted: false
               }
             };
