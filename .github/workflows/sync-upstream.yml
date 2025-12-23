@@ -25,7 +25,7 @@ jobs:
       
       - name: Add upstream remote
         run: |
-          git remote add upstream https://github.com/entranoweb/Auto-Claude.git || true
+          git remote add upstream https://github.com/AndyMik90/Auto-Claude.git || true
           git fetch upstream
       
       - name: Merge upstream main to local main
@@ -47,7 +47,7 @@ jobs:
           body: |
             ## 🔄 Automated Upstream Sync
             
-            This PR merges the latest changes from [entranoweb/Auto-Claude](https://github.com/entranoweb/Auto-Claude) into the `main` branch.
+            This PR merges the latest changes from [AndyMik90/Auto-Claude](https://github.com/AndyMik90/Auto-Claude) into the `main` branch.
             
             **Source:** `upstream/main`
             **Target:** `main`

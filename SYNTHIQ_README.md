@@ -1,7 +1,8 @@
 # 🚀 Auto-Claude: Synthiq Enhanced Edition
 
 **Branch:** `synthiq-claude`  
-**Base:** [entranoweb/Auto-Claude](https://github.com/entranoweb/Auto-Claude)  
+**Base:** [AndyMik90/Auto-Claude](https://github.com/AndyMik90/Auto-Claude)  
+**Fork:** [entranoweb/Auto-Claude](https://github.com/entranoweb/Auto-Claude)  
 **Status:** ✅ Production Ready with Enhanced Tools
 
 ---
@@ -61,11 +62,11 @@ This is Synthiq's customized version of Auto-Claude with:
 
 ### **Branch Structure:**
 ```
-upstream/main (entranoweb/Auto-Claude)
+upstream/main (AndyMik90/Auto-Claude - original repo)
     ↓
-origin/main (local copy of upstream)
+origin/main (entranoweb - your fork, synced with upstream)
     ↓
-origin/synthiq-claude (Synthiq customizations)
+origin/synthiq-claude (entranoweb - Synthiq customizations)
 ```
 
 ### **Workflow:**
@@ -109,15 +110,15 @@ git pull origin synthiq-claude
 
 ### **Automatic Sync (Recommended):**
 GitHub Actions runs daily at 2 AM UTC:
-1. Fetches latest from `entranoweb/Auto-Claude`
-2. Merges into local `main` branch
+1. Fetches latest from `AndyMik90/Auto-Claude` (upstream)
+2. Merges into your `main` branch
 3. Creates PR for you to review
 4. You merge `main` → `synthiq-claude` after testing
 
 ### **Manual Sync:**
 ```powershell
 # Add upstream (first time only)
-git remote add upstream https://github.com/entranoweb/Auto-Claude.git
+git remote add upstream https://github.com/AndyMik90/Auto-Claude.git
 
 # Fetch upstream changes
 git fetch upstream
@@ -201,7 +202,7 @@ git commit -m "chore: resolve upstream merge conflicts"
 - Review commit history for changes
 
 **For Auto-Claude core issues:**
-- Check [upstream repo](https://github.com/entranoweb/Auto-Claude)
+- Check [upstream repo](https://github.com/AndyMik90/Auto-Claude)
 - Discord: [Auto-Claude Community](https://discord.gg/KCXaPBr4Dj)
 
 ---
